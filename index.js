@@ -88,7 +88,7 @@ function onConnection(socket) {
 
   socket.on('event', (data) => {
     const { chatId, buffer } = data || {}
-    if (chatId && buffer && buffer.listen > 0) {
+    if (chatId && buffer && buffer.length > 0) {
       console.log('message:event  chatId: ', chatId)
       const extract = buffer.split(',')[1]
       const buff = new Buffer(extract, 'base64')
