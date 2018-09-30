@@ -1,0 +1,7 @@
+{
+  "name": "campot",
+  "env": {
+    "TOKEN": "@telegram-token"
+  },
+  "public": true
+}
