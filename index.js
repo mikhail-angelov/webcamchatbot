@@ -1,37 +1,50 @@
 const TelegramBot = require('node-telegram-bot-api')
 const io = require('socket.io')
 const micro = require('micro')
+const { router, get } = require('microrouter');
+const _ = require('lodash')
+const database = require('./db')
 
-// todo: this is bad design, those vars make this component stateful, so they should be moved to DB
+const CHATS = 'telegram-chats'
+const SELFI_LOG = 'selfi-log'
 const online = {}
-const chats ={}
 
 const token = process.env.TOKEN || 'fake'
 const telegramBot = new TelegramBot(token, { polling: true });
-const server = micro()
+const server = micro(rest())
 const socket = io(server)
 initSocket(socket)
 server.listen(4000, () => console.log('Listening on localhost:4000'))
 
 telegramBot.onText(/\/selfi/, onGetSelfi)
-telegramBot.onText(/\/setCam/, onPickCamera)
+telegramBot.onText(/\/setCam (.+)/, onPickCamera)
+telegramBot.onText(/\/campot/, onInfo)
 telegramBot.on('callback_query', onSelectCamera)
 
-function onGetSelfi(msg) {
-  console.log('getting selfi for: ', msg.chat.id)
-  sendMessage({ chatId: msg.chat.id, text: 'selfi' })
+function rest() {
+  return router(
+    get('/ping', async (req, res) => micro.send(res, 200, 'pong'))
+  )
 }
 
-async function onPickCamera(msg) {
-  console.log('onPickCamera')
+async function onInfo(msg) {
+  console.log('onInfo')
   const chatId = msg.chat.id
-  const fromId = msg.from.id;
+  telegramBot.sendMessage(chatId, 'This is webcam bot\n avaliable commands:\n /setCam <token> - connect web camera to chat \n /selfi - take a photo', {
+    parse_mode: 'Markdown'
+  })
+}
+
+async function onPickCamera(msg, match) {
+  console.log('onPickCamera', match)
+  const chatId = msg.chat.id
+  const cameraToken = match[1]
   try {
     telegramBot.sendMessage(chatId, 'Select camera', {
       parse_mode: 'Markdown',
       reply_markup: JSON.stringify({
         inline_keyboard: [Object.keys(online).map(cam => ({
-          text: cam, callback_data: cam
+          text: cam, callback_data: JSON.stringify({ cam, cameraToken }),
         }))],
       })
     })
@@ -41,29 +54,32 @@ async function onPickCamera(msg) {
   }
 }
 
-function onSelectCamera(query) {
+async function onSelectCamera(query) {
   try {
-    const queryId = query.id
-    const fromId = query.from.id
-    const fromName = query.from.first_name
+    const user = query.from.username
     const msgId = query.message.message_id
     const chatId = query.message.chat.id
-    const cam = query.data
-    console.log('cb: ', query)
-    chats[chatId] = cam
-    telegramBot.editMessageText(`Camera ${cam} is selected`, { chat_id: chatId, message_id: msgId, reply_markup: '' })
+    const { cam, cameraToken } = JSON.parse(query.data)
+    const realCameraToken = _.get(online[cam], 'cameraToken')
+    console.log('cb: ', cam, cameraToken, realCameraToken)
+    if (realCameraToken === cameraToken) {
+      await addCameraToChat({ chatId, cam, cameraToken, user })
+      telegramBot.editMessageText(`Camera ${cam} is selected 😎`, { chat_id: chatId, message_id: msgId, reply_markup: '' })
+    } else {
+      telegramBot.editMessageText(`Oops, camera token does not mutch, try onother one 😕`, { chat_id: chatId, message_id: msgId, reply_markup: '' })
+    }
   } catch (e) {
     console.log('error: ', e)
-    telegramBot.sendMessage(chatId, 'error :(')
+    telegramBot.sendMessage(chatId, 'internal error 😡')
   }
 }
 
 function initSocket(socket) {
   socket.use((socket, next) => {
     console.log('io socket handshake: ', socket.handshake.query)
-    if (socket.handshake.query && socket.handshake.query.token &&
-      socket.handshake.query.token === process.env.SECRET) {
+    if (socket.handshake.query && socket.handshake.query.token && socket.handshake.query.cam) {
       socket.cam = socket.handshake.query.cam
+      socket.cameraToken = socket.handshake.query.token
       next()
     } else {
       next(new Error('Authentication error'))
@@ -101,14 +117,49 @@ function onConnection(socket) {
   })
 }
 
-function sendMessage({ chatId, text }) {
-  console.log('sendMessage: ', chatId, text)
+async function onGetSelfi(msg) {
+  const chatId = msg.chat.id
+  const user = msg.from.username
+  console.log('getting selfi for: ', chatId)
   try {
-    const cam = chats[chatId]
-    const socket = online[cam]
-    console.log('send event: ', !!socket, cam, ' for: ', chatId)
-    socket && socket.emit('event', { chatId, text })
+    const chat = await getChatCamera({ chatId })
+    if (chat && chat.cam) {
+      const socket = online[chat.cam]
+      if (socket && socket.cameraToken === chat.cameraToken) {
+        console.log('send event: ', chat.cam, ' for: ', chatId)
+        addSelfiLog({ chatId, user, timestamp: Date.now(), status: true })
+        socket && socket.emit('event', { chatId, text: 'selfi' })
+      } else {
+        telegramBot.sendMessage(chatId, 'Camera is offline, or camera token was changed 😕')
+      }
+    } else {
+      telegramBot.sendMessage(chatId, 'This chat does not connect to any camera 😕')
+    }
   } catch (e) {
     console.error('cannot send message, ', e)
+    telegramBot.sendMessage(chatId, 'Cam bot internal error 😡')
+    addSelfiLog({ chatId, user, timestamp: Date.now(), status: false })
   }
+}
+
+async function addCameraToChat({ chatId, cam, cameraToken, user }) {
+  const db = await database.db()
+  const record = { chatId, cam, cameraToken, user }
+  return db.collection(CHATS).updateOne({ chatId }, { $set: record }, { upsert: true })
+}
+
+async function getChatCamera({ chatId }) {
+  const db = await database.db()
+  const record = await db.collection(CHATS).findOne({ chatId })
+  if (record && record.cam) {
+    return record
+  } else {
+    return Promise.reject('Camera is not connected')
+  }
+}
+
+async function addSelfiLog({ chatId, user, timestamp, status }) {
+  const db = await database.db()
+  const record = { chatId, user, timestamp, status }
+  return db.collection(SELFI_LOG).updateOne({ chatId }, { $set: record }, { upsert: true })
 }

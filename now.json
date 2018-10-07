@@ -2,7 +2,8 @@
   "name": "campot",
   "env": {
     "TOKEN": "@telegram-token",
-    "SECRET": "@webcam-token"
+    "SECRET": "@webcam-token",
+    "DB_URL": "@db-url"
   },
   "public": true
 }
