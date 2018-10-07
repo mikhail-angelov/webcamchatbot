@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
-    "dev": "TOKEN='655190042:AAHwXC5Xlv7P83MqhnXX_yVyIUQSewRS4DA' nodemon index.js",
+    "dev": "TOKEN='fake' nodemon index.js",
     "deploy": "now rm campot -y; now"
   },
   "repository": {
